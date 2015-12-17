@@ -167,7 +167,9 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 	char time_buf[30] = {0};
 	char *log_dir = "/home/ftp/aging_test_log_files";
 	char *log_path = "/home/ftp/aging_test_log_files/aging_test_log-";
+	pthread_mutex_lock(&glb.hdlc_mutex);
 	glb.host_cmd = buf[0] + (buf[1]<<8) + (buf[2]<<16) + (buf[3]<<24);	//以太网命令4bytes
+	pthread_mutex_unlock(&glb.hdlc_mutex);
 	switch(glb.host_cmd)
 	{
 		case CMD_OPENLOOP:		//开环测试：子包大小64bytes；测试模块数量1；HDLC超时时间100ms
@@ -225,6 +227,12 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 				printf("Can't create aging test log file\n");
 				return;
 			}
+			break;
+		case CMD_AGING_LONGFRAME:
+			glb.test_cmd = CMD_AGING_LONGFRAME;
+            glb.net_child_packet_size = CHLD_PACK_LEN_S;
+            glb.module_num = AGTEST_MODULE_NUM;
+            glb.hdlc_timeout = HDLC_TIMEOUT_L;
 			break;
 		case CMD_GETDATA:
 			pthread_mutex_lock(&glb.hdlc_mutex);
@@ -288,15 +296,18 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 			(module+i)->comm_cmd.len = buf[7+i*glb.net_child_packet_size];
 			memcpy((module+i)->comm_cmd.cont, &buf[8+i*glb.net_child_packet_size], (module+i)->comm_cmd.len);
 		}
-		else
+		if (glb.test_cmd == CMD_AGING)
 		{
-			if (glb.test_cmd == CMD_AGING)
-			{
-				(module+i)->plug = false;
-				(module+i)->addr = i;
-				(module+i)->comm_cmd.cmd = 0;
-				(module+i)->comm_cmd.len = 0;
-			}
+			(module+i)->plug = false;
+			(module+i)->addr = i;
+			(module+i)->comm_cmd.cmd = 0;
+			(module+i)->comm_cmd.len = 0;
+		}
+		if (glb.test_cmd == CMD_AGING_LONGFRAME)
+		{
+	  		(module+i)->addr = buf[4+i*glb.net_child_packet_size];
+	        (module+i)->comm_cmd.cmd = buf[5+i*glb.net_child_packet_size];
+            (module+i)->comm_cmd.len = 0;
 		}
 	}
 	if (glb.run_stat == STOP)

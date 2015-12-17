@@ -70,7 +70,7 @@ void parse_hdlc_recv_data(module_info_t *module_head, int module_num, unsigned c
 			}
 			else
 			{
-				if (glb.test_cmd != CMD_AGING)
+				if (glb.test_cmd == CMD_OPENLOOP || glb.test_cmd == CMD_CLOSELOOP)
 				{
 					if ((hdlc_rbuf[0] != (module_head+module_num)->addr) || (hdlc_rbuf[2] != (module_head+module_num)->type))
 					{
@@ -83,9 +83,16 @@ void parse_hdlc_recv_data(module_info_t *module_head, int module_num, unsigned c
 	}
 	else
 	{
-		if ((hdlc_rbuf[0] == (module_head+module_num)->addr) && (hdlc_rbuf[3] == 0x1))
+		if ((module_head+module_num)->comm_stat.timeout_flag == true) //如果认为卡件未插，并且仍旧通讯超时
 		{
-			(module_head+module_num)->plug = true;
+			hdlc_rbuf[2] = 0;										  //此时向上位机返回一个为0的版码值表明没有卡件,手动添加hdlc_rbuf对应版码值的那一位
+		}
+		else														  //否则，认为卡件未插，但该此通讯通上了，说明卡件在此次通讯之前插入，设置卡件插入状态标志
+		{
+			if ((hdlc_rbuf[0] == (module_head+module_num)->addr) && (hdlc_rbuf[3] == 0x1))
+			{
+				(module_head+module_num)->plug = true;
+			}
 		}
 	}
 }
@@ -120,7 +127,7 @@ void fill_net_send_packet(module_info_t *module_head, int module_num, unsigned c
 	net_sbuf[module_num*glb.net_child_packet_size+15] = ((module_head+module_num)->comm_stat.err_cnt >> 24) & 0xff;
 	if ((module_head+module_num)->comm_stat.timeout_flag == false)
 	{
-		if (glb.test_cmd != CMD_AGING)
+		if (glb.test_cmd == CMD_OPENLOOP || glb.test_cmd == CMD_CLOSELOOP)
 		{
 			if ((hdlc_rlen - 6) > 0)
 			{
@@ -163,57 +170,61 @@ void *hdlc_comm_func(void *arg)
 		num = 0;
 		while (num < glb.module_num)
 		{
-			memset(hdlc_sbuf, 0, sizeof(hdlc_sbuf));
-			hdlc_slen = fill_hdlc_send_buf(module, num, hdlc_sbuf);
-			set_timeval(&tv, 0, glb.hdlc_timeout);	
-			FD_ZERO(&fds);
-			FD_SET(glb.dev_fd, &fds);
-			pthread_mutex_lock(&glb.hdlc_mutex);
-			if ((ret = select(glb.dev_fd+1, NULL, &fds, NULL, NULL)) <= 0)
+			if (!(((module+num)->plug == false) && (glb.test_cmd == CMD_AGING_LONGFRAME))) //如果进入长帧扫描状态，且卡件还未插就不去扫描当前地址了
+
 			{
-				pthread_mutex_unlock(&glb.hdlc_mutex);
-				continue;
-			}
-			else 
-			{
-				if (FD_ISSET(glb.dev_fd, &fds))
+				memset(hdlc_sbuf, 0, sizeof(hdlc_sbuf));
+				hdlc_slen = fill_hdlc_send_buf(module, num, hdlc_sbuf);
+				set_timeval(&tv, 0, glb.hdlc_timeout);	
+				FD_ZERO(&fds);
+				FD_SET(glb.dev_fd, &fds);
+				pthread_mutex_lock(&glb.hdlc_mutex);
+				if ((ret = select(glb.dev_fd+1, NULL, &fds, NULL, NULL)) <= 0)
+				{
+					pthread_mutex_unlock(&glb.hdlc_mutex);
+					continue;
+				}
+				else 
+				{
+					if (FD_ISSET(glb.dev_fd, &fds))
+					{
+						for (;;)
+						{
+							if (write(glb.dev_fd, hdlc_sbuf, hdlc_slen) == hdlc_slen)
+							{
+								break;
+							}
+						}
+					}
+				}		
+				memset(hdlc_rbuf, 0, sizeof(hdlc_rbuf));
+				set_timeval(&tv, 0, glb.hdlc_timeout);	
+				FD_ZERO(&fds);
+				FD_SET(glb.dev_fd, &fds);
+				if ((ret = select(glb.dev_fd+1, &fds, NULL, NULL, &tv)) < 0)
+				{
+					perror("Select for read HDLC receive buffer.\n");
+					pthread_mutex_unlock(&glb.hdlc_mutex);
+					continue;
+				}
+				else if (ret == 0)
+				{
+					USER_DBG("Wait for IO module return HDLC data timeout.\n");
+					(module+num)->comm_stat.timeout_flag = true;	
+				}
+				else
 				{
 					for (;;)
 					{
-						if (write(glb.dev_fd, hdlc_sbuf, hdlc_slen) == hdlc_slen)
+						if ((hdlc_rlen = read(glb.dev_fd, hdlc_rbuf, sizeof(hdlc_rbuf))) != -1)
 						{
+							(module+num)->comm_stat.timeout_flag = false;	
 							break;
 						}
 					}
-				}
-			}		
-			memset(hdlc_rbuf, 0, sizeof(hdlc_rbuf));
-			set_timeval(&tv, 0, glb.hdlc_timeout);	
-			FD_ZERO(&fds);
-			FD_SET(glb.dev_fd, &fds);
-			if ((ret = select(glb.dev_fd+1, &fds, NULL, NULL, &tv)) < 0)
-			{
-				perror("Select for read HDLC receive buffer.\n");
+				}	
 				pthread_mutex_unlock(&glb.hdlc_mutex);
-				continue;
 			}
-			else if (ret == 0)
-			{
-				USER_DBG("Wait for IO module return HDLC data timeout.\n");
-				(module+num)->comm_stat.timeout_flag = true;	
-			}
-			else
-			{
-				for (;;)
-				{
-					if ((hdlc_rlen = read(glb.dev_fd, hdlc_rbuf, sizeof(hdlc_rbuf))) != -1)
-					{
-						(module+num)->comm_stat.timeout_flag = false;	
-						break;
-					}
-				}
-			}
-			pthread_mutex_unlock(&glb.hdlc_mutex);
 			pthread_mutex_lock(&glb.hdlc_ch_change_mutex);
 			if (glb.hdlc_ch_change_flag == false)
 			{

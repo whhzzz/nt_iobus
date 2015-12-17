@@ -6,13 +6,14 @@
 #define TCP_PORT		7000
 #define NET_TIMEOUT		5000		//500ms
 
-#define CMD_OPENLOOP    0xAAAAAAAA
-#define CMD_CLOSELOOP   0xBBBBBBBB
-#define CMD_AGING       0xCCCCCCCC
-#define CMD_STOP	    0xDDDDDDDD
-#define CMD_CHANGECH	0xEEEEEEEE
-#define CMD_GETDATA		0xFFFFFFFF
-#define CMD_LEN			4
+#define CMD_OPENLOOP    	0xAAAAAAAA
+#define CMD_CLOSELOOP   	0xBBBBBBBB
+#define CMD_AGING      		0xCCCCCCCC
+#define CMD_AGING_LONGFRAME	0xA5A5A5A5
+#define CMD_STOP	   		0xDDDDDDDD
+#define CMD_CHANGECH		0xEEEEEEEE
+#define CMD_GETDATA			0xFFFFFFFF
+#define CMD_LEN				4
 
 
 extern unsigned char net_rbuf[1500];
