@@ -234,7 +234,7 @@ void *hdlc_comm_func(void *arg)
 			num++;
 			gettimeofday(&tv1, NULL);
 			tm = localtime(&tv1.tv_sec);
-			if (((module+num)->plug == true) && (glb.test_cmd == CMD_AGING))
+			if (((module+num)->plug == true) && (glb.test_cmd == CMD_AGING || glb.test_cmd == CMD_AGING_LONGFRAME))
 			{
 				if (glb.hdlc_ch == 1)
 				{

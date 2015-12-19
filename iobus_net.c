@@ -189,43 +189,46 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 			glb.net_child_packet_size = CHLD_PACK_LEN_S;
 			glb.module_num = AGTEST_MODULE_NUM;
 			glb.hdlc_timeout = HDLC_TIMEOUT_L;
-			strcpy(old_log_path, log_path);
-			memcpy(&sec, &buf[4], 4);
-			memcpy(&min, &buf[8], 4);
-			memcpy(&hour, &buf[12], 4);
-			memcpy(&day, &buf[16], 4);
-			memcpy(&mon, &buf[20], 4);
-			memcpy(&year, &buf[24], 4);
-			tm.tm_sec = sec;
-			tm.tm_min = min;
-			tm.tm_hour = hour;
-			tm.tm_mday = day;
-			tm.tm_mon = mon-1;
-			tm.tm_year = year - 1900;
-			time = mktime(&tm);
-			tv.tv_sec = time;
-			tv.tv_usec = 0;
-			if (settimeofday(&tv, NULL) < 0)
+			if (glb.run_stat == STOP)
 			{
-				printf("no permission, make sure login with root user\n");
-			}	
-			sprintf(time_buf, "%d%02d%02d-%02d%02d%02d", year, mon, day, hour, min, sec);
-			strcat(old_log_path, time_buf);
-			strcpy(new_log_path, old_log_path);
-			if (opendir(log_dir) == NULL)
-			{
-				if (mkdir(log_dir, S_IRWXU | S_IRWXG | S_IRWXO) != 0)
+				strcpy(old_log_path, log_path);
+				memcpy(&sec, &buf[4], 4);
+				memcpy(&min, &buf[8], 4);
+				memcpy(&hour, &buf[12], 4);
+				memcpy(&day, &buf[16], 4);
+				memcpy(&mon, &buf[20], 4);
+				memcpy(&year, &buf[24], 4);
+				tm.tm_sec = sec;
+				tm.tm_min = min;
+				tm.tm_hour = hour;
+				tm.tm_mday = day;
+				tm.tm_mon = mon-1;
+				tm.tm_year = year - 1900;
+				time = mktime(&tm);
+				tv.tv_sec = time;
+				tv.tv_usec = 0;
+				if (settimeofday(&tv, NULL) < 0)
 				{
-					printf("Can't make dir for ftp record\n");
+					printf("no permission, make sure login with root user\n");
+				}	
+				sprintf(time_buf, "%d%02d%02d-%02d%02d%02d", year, mon, day, hour, min, sec);
+				strcat(old_log_path, time_buf);
+				strcpy(new_log_path, old_log_path);
+				if (opendir(log_dir) == NULL)
+				{
+					if (mkdir(log_dir, S_IRWXU | S_IRWXG | S_IRWXO) != 0)
+					{
+						printf("Can't make dir for ftp record\n");
+						return;
+					}
+				}
+				chmod(log_dir, S_IRWXU | S_IRWXG | S_IRWXO);
+				glb.log_fd = open(old_log_path, O_WRONLY|O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
+				if (glb.log_fd == -1)
+				{
+					printf("Can't create aging test log file\n");
 					return;
 				}
-			}
-			chmod(log_dir, S_IRWXU | S_IRWXG | S_IRWXO);
-			glb.log_fd = open(old_log_path, O_WRONLY|O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
-			if (glb.log_fd == -1)
-			{
-				printf("Can't create aging test log file\n");
-				return;
 			}
 			break;
 		case CMD_AGING_LONGFRAME:
@@ -242,7 +245,7 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 		case CMD_STOP:			//停止测试：需等待HDLC通信线程退出
 			glb.run_stat = STOP;
 			pthread_join(glb.hdlc_comm_tid, NULL);
-			if (glb.test_cmd == CMD_AGING)
+			if (glb.test_cmd == CMD_AGING || glb.test_cmd == CMD_AGING_LONGFRAME)
 			{
 				memcpy(&sec, &buf[4], 4);
 				memcpy(&min, &buf[8], 4);
@@ -296,7 +299,7 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 			(module+i)->comm_cmd.len = buf[7+i*glb.net_child_packet_size];
 			memcpy((module+i)->comm_cmd.cont, &buf[8+i*glb.net_child_packet_size], (module+i)->comm_cmd.len);
 		}
-		if (glb.test_cmd == CMD_AGING)
+		if (glb.test_cmd == CMD_AGING || glb.run_stat == STOP)
 		{
 			(module+i)->plug = false;
 			(module+i)->addr = i;
