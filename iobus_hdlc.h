@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#define HDLC_TIMEOUT_L          	2500     	//2.5ms
+#define HDLC_TIMEOUT_L          	10000     	//10ms
 //#define HDLC_TIMEOUT_S          	500        	//500us 68302不行
 #define HDLC_TIMEOUT_S          	1000       	//1ms
 #define HDLC_BROADCAST_TIMEINTERVAL (50*1000)  //100ms

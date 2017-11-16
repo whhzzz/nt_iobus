@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -11,18 +12,22 @@
 #include "iobus_hdlc.h"
 
 global_param_t glb;
-int timer_cnt = 0;
-int led = 0;
 static void *sig_func(void *arg)
 {
+	static int timer_cnt = 0;
+	static int led = 0;
 	int sig_no = 0;
 	int ret = 0;
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 20*100; //20ms
 	for (;;)
 	{
 		ret = sigwait(&glb.sig_mask, &sig_no);
 		if (ret != 0)
 		{
-			perror("Sigwait failed :");
+			printf("Sigwait failed :");
+			continue;
 		}
 		else
 		{
@@ -37,12 +42,20 @@ static void *sig_func(void *arg)
 				case SIGPIPE:
 					printf("SIGPIPE.\n");
 					break;
+				case SIGTERM:
+					printf("SIGTERM.\n");
+					break;
+				case SIGKILL:
+					printf("SIGKILL.\n");
+					break;
+				case SIGSTOP:
+					printf("SIGSTOP.\n");
+					break;
 			/*	case SIGALRM:
              		glb.hdlc_ch_change_flag = false;
              		break;*/
 				case SIGALRM:
-//					printf("www\n");
-					if (timer_cnt == 5)
+					if (timer_cnt == 20)
 					{
             	  		pthread_mutex_lock(&glb.hdlc_ch_change_mutex);
 						glb.hdlc_ch_change_flag = false;
@@ -61,38 +74,46 @@ static void *sig_func(void *arg)
 					{
 						led = 0;
 					}
+					pthread_mutex_lock(&glb.hdlc_mutex);
 					ioctl(glb.dev_fd, IOBUS_IOC_LED_STAT, led);
+					pthread_mutex_unlock(&glb.hdlc_mutex);
 					fd_set fds;
              		FD_ZERO(&fds);
             		FD_SET(glb.dev_fd, &fds);
-            		if ((ret = select(glb.dev_fd+1, NULL, &fds, NULL, NULL)) < 0)
+            		ret = select(glb.dev_fd+1, NULL, &fds, NULL, &tv);
+            		if (ret < 0)
              		{
-//						pthread_mutex_unlock(&glb.hdlc_mutex);
-                 		return;
+						printf("select erro\n");
+                 		continue;
+
  					}
+					else if (ret == 0)
+					{
+						//printf("select timeout\n");
+						continue;
+					}
             		else
             		{
                  		if (FD_ISSET(glb.dev_fd, &fds))
                  		{
-                     		for (;;)
-                   			{
-								pthread_mutex_lock(&glb.hdlc_mutex);
-                         		if (write(glb.dev_fd, glb.hdlc_broadcast_buf, sizeof(glb.hdlc_broadcast_buf)) == sizeof(glb.hdlc_broadcast_buf))
-                         		{
-									usleep(500);
-									pthread_mutex_unlock(&glb.hdlc_mutex);
-									break;
-                       			}
-                    		 }
+							pthread_mutex_lock(&glb.hdlc_mutex);
+                       		if (write(glb.dev_fd, glb.hdlc_broadcast_buf, sizeof(glb.hdlc_broadcast_buf)) == sizeof(glb.hdlc_broadcast_buf))
+                       		{
+								usleep(1000); //避免广播之后马上就发数据，有的的卡件怼着发有问题
+								pthread_mutex_unlock(&glb.hdlc_mutex);
+                    		}
+							pthread_mutex_unlock(&glb.hdlc_mutex);
                  		}
             		}
 					break;
 				default:
+					printf("unknown signal\n");
 					break;
 			}
 		}
 	}
-	return;
+	printf("exit\n");
+	return NULL;
 } 
 
 bool system_init()
@@ -118,14 +139,17 @@ bool system_init()
 		perror("Can't set iobus HDLC channel1 :");
 		return false;
 	}
-//	signal(SIGALRM, hdlc_ch_change_sig_func);
 	pthread_mutex_init(&glb.hdlc_mutex, NULL);
 	pthread_mutex_init(&glb.hdlc_ch_change_mutex, NULL);
 	sigemptyset(&glb.sig_mask);
-//	sigaddset(&glb.sig_mask, SIGINT);
-//	sigaddset(&glb.sig_mask, SIGPIPE);
-//	sigaddset(&glb.sig_mask, SIGQUIT);
 	sigaddset(&glb.sig_mask, SIGALRM);
+	sigaddset(&glb.sig_mask, SIGPIPE);
+/*	sigaddset(&glb.sig_mask, SIGINT);
+	sigaddset(&glb.sig_mask, SIGQUIT);
+	sigaddset(&glb.sig_mask, SIGKILL);
+	sigaddset(&glb.sig_mask, SIGTERM);
+	sigaddset(&glb.sig_mask, SIGSTOP);
+*/
 	pthread_sigmask(SIG_BLOCK, &glb.sig_mask, NULL);
 	glb.hdlc_broadcast_buf[0] = 0xfe;
 	glb.hdlc_broadcast_buf[1] = 0;

@@ -29,7 +29,7 @@
 #define START				true    
 #define STOP				false
 
-#define HDLC_CH1			0
+#define HDLC_CH1			0	
 #define HDLC_CH2			1
 #define HDLC_CH_ALL			2
 

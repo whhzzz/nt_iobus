@@ -9,6 +9,8 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "iobus_net.h"
@@ -44,7 +46,7 @@ bool create_server_socket()
 	struct sockaddr_in server_addr;
     if ((glb.server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
-		perror("Create server socket failed: ");
+		printf("Create server socket failed: errno %d\n", errno);
         return false;
     }
     bzero(&server_addr, sizeof(server_addr));
@@ -53,13 +55,13 @@ bool create_server_socket()
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(glb.server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1)
     {
-		perror("Bind server socket failed: ");
+		printf("Bind server socket failed: errno %d\n", errno);
 	    close(glb.server_fd);
 		return false;
     }
     if (listen(glb.server_fd, 5) == -1)
     {
-        perror("Set server listen falied: ");
+        printf("Set server listen falied: errno %d\n", errno);
 	    close(glb.server_fd);
 		return false;	    
     }
@@ -79,8 +81,9 @@ void net_data_recv_loop()
 	int max_fd = glb.server_fd;
 	bool connected = false;
 	struct sockaddr_in client_addr;
-	int addr_len = sizeof(client_addr);
+	int addr_len = sizeof(struct sockaddr);
 	int net_rlen = 0;
+	static int old_client_fd = -100;
 	struct timeval tv = {0, 0};
 	fd_set fds;
 	while(1)
@@ -113,11 +116,17 @@ void net_data_recv_loop()
 				glb.client_fd = accept(glb.server_fd, (struct sockaddr *)&client_addr, &addr_len);
 				if (glb.client_fd == -1)			//TCP三次握手失败，无法获取client端socket描述符
  		        {
- 	            	USER_DBG("Three-way handshake failed.\n");
+ 	            	printf("Three-way handshake failed.\n");
+					printf("errno%d", errno);
                 }
                 else
                 {
                    	USER_DBG("A new client[IP:%s] has been connected.\n", inet_ntoa(client_addr.sin_addr));
+					if (old_client_fd != -100)
+					{
+						close(old_client_fd);
+					}
+					old_client_fd = glb.client_fd;
                     connected = true;			//设置已连接标志
 					if (glb.client_fd > max_fd)
 					{
@@ -127,7 +136,7 @@ void net_data_recv_loop()
             }
             if (FD_ISSET(glb.client_fd, &fds))		//说明网络上有客户端数据可以读取了    
             {
-            	net_rlen = recv(glb.client_fd, net_rbuf, sizeof(net_rbuf), 0);
+            	net_rlen = recv(glb.client_fd, net_rbuf, sizeof(net_rbuf), MSG_NOSIGNAL);
                 if (net_rlen > 0)					//正常接收数据
                 {
   					parse_net_recv_packet(net_rbuf, net_rlen);
@@ -138,11 +147,15 @@ void net_data_recv_loop()
                 }
                 else								//client端socket关闭,上位机可以在网络断开后重连，这时服务端认为一个新的客户端连接，覆盖掉上一次的client端socket描述符，为这次新的连接再accpet一次
                 {
+					printf("tcp client disconnect\n");
 					connected = false;
+					close(glb.client_fd);
+					old_client_fd = -100;
 				}
 			}
 		}
 	}
+	printf("break loop\n");
 }
 
 /**
@@ -154,7 +167,7 @@ void net_data_recv_loop()
 	
 void parse_net_recv_packet(unsigned char *buf, int len)
 {
-	int i = 0;
+	unsigned int i = 0;
 	int sec = 0;
 	int min = 0;
 	int hour = 0;
@@ -167,6 +180,7 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 	char time_buf[30] = {0};
 	char *log_dir = "/home/ftp/aging_test_log_files";
 	char *log_path = "/home/ftp/aging_test_log_files/aging_test_log-";
+	struct stat statbuf;
 	pthread_mutex_lock(&glb.hdlc_mutex);
 	glb.host_cmd = buf[0] + (buf[1]<<8) + (buf[2]<<16) + (buf[3]<<24);	//以太网命令4bytes
 	pthread_mutex_unlock(&glb.hdlc_mutex);
@@ -214,12 +228,15 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 				sprintf(time_buf, "%d%02d%02d-%02d%02d%02d", year, mon, day, hour, min, sec);
 				strcat(old_log_path, time_buf);
 				strcpy(new_log_path, old_log_path);
-				if (opendir(log_dir) == NULL)
+				if ( 0 != stat(log_dir,&statbuf))
 				{
-					if (mkdir(log_dir, S_IRWXU | S_IRWXG | S_IRWXO) != 0)
+					if (errno == ENOENT)
 					{
-						printf("Can't make dir for ftp record\n");
-						return;
+						if (mkdir(log_dir, S_IRWXU | S_IRWXG | S_IRWXO) != 0)
+						{
+							printf("Can't make dir for ftp record\n");
+							return;
+						}
 					}
 				}
 				chmod(log_dir, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -243,20 +260,24 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 			pthread_mutex_unlock(&glb.hdlc_mutex);
 			return;	
 		case CMD_STOP:			//停止测试：需等待HDLC通信线程退出
-			glb.run_stat = STOP;
-			pthread_join(glb.hdlc_comm_tid, NULL);
-			if (glb.test_cmd == CMD_AGING || glb.test_cmd == CMD_AGING_LONGFRAME)
+			if (glb.run_stat == START)
 			{
-				memcpy(&sec, &buf[4], 4);
-				memcpy(&min, &buf[8], 4);
-				memcpy(&hour, &buf[12], 4);
-				memcpy(&day, &buf[16], 4);
-				memcpy(&mon, &buf[20], 4);
-				memcpy(&year, &buf[24], 4);
-				sprintf(time_buf, "~%d%02d%02d-%02d%02d%02d.csv", year, mon, day, hour, min, sec);
-				strcat(new_log_path, time_buf);
-				rename(old_log_path, new_log_path);
-				chmod(new_log_path, S_IRWXU | S_IRWXG | S_IRWXO);
+				glb.run_stat = STOP;
+				pthread_join(glb.hdlc_comm_tid, NULL);
+				if (glb.test_cmd == CMD_AGING || glb.test_cmd == CMD_AGING_LONGFRAME)
+				{
+					close(glb.log_fd);
+					memcpy(&sec, &buf[4], 4);
+					memcpy(&min, &buf[8], 4);
+					memcpy(&hour, &buf[12], 4);
+					memcpy(&day, &buf[16], 4);
+					memcpy(&mon, &buf[20], 4);
+					memcpy(&year, &buf[24], 4);
+					sprintf(time_buf, "~%d%02d%02d-%02d%02d%02d.csv", year, mon, day, hour, min, sec);
+					strcat(new_log_path, time_buf);
+					rename(old_log_path, new_log_path);
+					chmod(new_log_path, S_IRWXU | S_IRWXG | S_IRWXO);
+				}
 			}
 			return;
 		case CMD_CHANGECH:		//HDLC通道选择: 
@@ -292,28 +313,40 @@ void parse_net_recv_packet(unsigned char *buf, int len)
 	{
 		if (glb.test_cmd == CMD_OPENLOOP || glb.test_cmd == CMD_CLOSELOOP)
 		{
-			(module+i)->plug = true;
+//			pthread_mutex_lock(&glb.hdlc_mutex); /***********20170804最新添加***************/
+			if (glb.run_stat == STOP)			//20171110最新添加
+			{
+				(module+i)->plug = true;
+			}
 			(module+i)->type = buf[4+i*glb.net_child_packet_size];
 			(module+i)->addr = buf[5+i*glb.net_child_packet_size];
 			(module+i)->comm_cmd.cmd = buf[6+i*glb.net_child_packet_size];
 			(module+i)->comm_cmd.len = buf[7+i*glb.net_child_packet_size];
 			memcpy((module+i)->comm_cmd.cont, &buf[8+i*glb.net_child_packet_size], (module+i)->comm_cmd.len);
+//			pthread_mutex_unlock(&glb.hdlc_mutex); 	/***********20170804最新添加***************/
 		}
-		if (glb.test_cmd == CMD_AGING || glb.run_stat == STOP)
+		else if (glb.test_cmd == CMD_AGING)
 		{
-			(module+i)->plug = false;
+//			pthread_mutex_lock(&glb.hdlc_mutex);  /***********20170804最新添加***************/
+			if (glb.run_stat == STOP) 
+			{
+				(module+i)->plug = false;
+			}
 			(module+i)->addr = i;
 			(module+i)->comm_cmd.cmd = 0;
 			(module+i)->comm_cmd.len = 0;
+//			pthread_mutex_unlock(&glb.hdlc_mutex);/***********20170804最新添加***************/
 		}
-		if (glb.test_cmd == CMD_AGING_LONGFRAME)
+		else if (glb.test_cmd == CMD_AGING_LONGFRAME)
 		{
+//			pthread_mutex_lock(&glb.hdlc_mutex);
 	  		(module+i)->addr = buf[4+i*glb.net_child_packet_size];
 	        (module+i)->comm_cmd.cmd = buf[5+i*glb.net_child_packet_size];
             (module+i)->comm_cmd.len = 0;
+//			pthread_mutex_unlock(&glb.hdlc_mutex);
 		}
 	}
-	if (glb.run_stat == STOP)
+	if ((glb.run_stat == STOP) && ((glb.test_cmd == CMD_OPENLOOP) || (glb.test_cmd == CMD_CLOSELOOP) || (glb.test_cmd == CMD_AGING))) 
 	{
 		glb.run_stat = START;
 		pthread_create(&glb.hdlc_comm_tid, NULL, hdlc_comm_func, NULL);

@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include "iobus_hdlc.h"
 #include "iobus_crc.h"
@@ -72,7 +73,7 @@ void parse_hdlc_recv_data(module_info_t *module_head, int module_num, unsigned c
 			{
 				if (glb.test_cmd == CMD_OPENLOOP || glb.test_cmd == CMD_CLOSELOOP)
 				{
-					if ((hdlc_rbuf[0] != (module_head+module_num)->addr) || (hdlc_rbuf[2] != (module_head+module_num)->type))
+					if (hdlc_rbuf[0] != (module_head+module_num)->addr)
 					{
 						(module_head+module_num)->comm_stat.err_cnt++;
 						(module_head+module_num)->comm_stat.err_flag = true;
@@ -83,7 +84,7 @@ void parse_hdlc_recv_data(module_info_t *module_head, int module_num, unsigned c
 	}
 	else
 	{
-		if ((module_head+module_num)->comm_stat.timeout_flag == true) //如果认为卡件未插，并且仍旧通讯超时
+		if ((module_head+module_num)->comm_stat.timeout_flag == true) //第一次扫描时用，如果认为卡件未插，并且仍旧通讯超时
 		{
 			hdlc_rbuf[2] = 0;										  //此时向上位机返回一个为0的版码值表明没有卡件,手动添加hdlc_rbuf对应版码值的那一位
 		}
@@ -92,6 +93,10 @@ void parse_hdlc_recv_data(module_info_t *module_head, int module_num, unsigned c
 			if ((hdlc_rbuf[0] == (module_head+module_num)->addr) && (hdlc_rbuf[3] == 0x1))
 			{
 				(module_head+module_num)->plug = true;
+			}
+			else
+			{
+				hdlc_rbuf[2] = 0;									 //之前没有复位版码值，导致地址虽然检验不正确但仍然报给上位机
 			}
 		}
 	}
@@ -136,13 +141,17 @@ void fill_net_send_packet(module_info_t *module_head, int module_num, unsigned c
 			}
 			else
 			{
-				memset(&net_sbuf[module_num*glb.net_child_packet_size+16], 0, glb.net_child_packet_size-16);	//一开始没处理这个清零，因为对于一般卡件输出命令，比如DO全路输出，其返回命令为ADDR 0x00 ID_MODULE 0x01加crc一共6个字节，上面if判断不到，net_sbuf[16]以后保持之前数据不被覆盖，而上位机APP利用net_sbuf[16]判断是否需要将命令从全路输出切回全路扫描，当net_sbuf[16]为0时，即cmdContLength为0时，切回全路扫描，正因为net_sbuf[16]没有重新填充导致命令一直为全路输出，这样会回读不到端子状态
+				memset(&net_sbuf[module_num*glb.net_child_packet_size+16], 0, glb.net_child_packet_size-12);	//一开始没处理这个清零，因为对于一般卡件输出命令，比如DO全路输出，其返回命令为ADDR 0x00 ID_MODULE 0x01加crc一共6个字节，上面if判断不到，net_sbuf[16]以后保持之前数据不被覆盖，而上位机APP利用net_sbuf[16]判断是否需要将命令从全路输出切回全路扫描，当net_sbuf[16]为0时，即cmdContLength为0时，切回全路扫描，正因为net_sbuf[16]没有重新填充导致命令一直为全路输出，这样会回读不到端子状态
 			}
 		}
 		else
 		{
 			memcpy(&net_sbuf[module_num*glb.net_child_packet_size+16], &hdlc_rbuf[2], 1);	
 		}
+	}
+	else
+	{
+		memset(&net_sbuf[module_num*glb.net_child_packet_size+16], 0, glb.net_child_packet_size-12);	//不清零会导致当上位机软件重启时，TPU不重启，如果之前有位置的卡件被拔下，在该位置还是会传输版码
 	}
 }
 
@@ -151,11 +160,15 @@ void fill_net_send_packet(module_info_t *module_head, int module_num, unsigned c
  */
 void *hdlc_comm_func(void *arg)
 {
-	int num = 0;
+	unsigned int num = 0;
 	int ret = 0;
-	fd_set fds;
-	struct timeval tv = {0, 0};
-	struct timeval tv1 = {0, 0};
+	fd_set fds_snd;
+	fd_set fds_recv;
+	fd_set fds;   //for get data
+	struct timeval tv_snd = {0, 0};
+	struct timeval tv_recv = {0, 0};
+	struct timeval tv = {0, 0};   //for get data
+	struct timeval tv1 = {0, 0};	
 	struct tm *tm = NULL;
 	int ch_num = 0;
 	int hdlc_slen = 0;
@@ -174,63 +187,79 @@ void *hdlc_comm_func(void *arg)
 
 			{
 				memset(hdlc_sbuf, 0, sizeof(hdlc_sbuf));
-				hdlc_slen = fill_hdlc_send_buf(module, num, hdlc_sbuf);
-				set_timeval(&tv, 0, glb.hdlc_timeout);	
-				FD_ZERO(&fds);
-				FD_SET(glb.dev_fd, &fds);
+				memset(hdlc_rbuf, 0, sizeof(hdlc_rbuf));
 				pthread_mutex_lock(&glb.hdlc_mutex);
-				if ((ret = select(glb.dev_fd+1, NULL, &fds, NULL, NULL)) <= 0)
+				hdlc_slen = fill_hdlc_send_buf(module, num, hdlc_sbuf);
+				set_timeval(&tv_snd, 0, glb.hdlc_timeout);	
+				FD_ZERO(&fds_snd);
+				FD_SET(glb.dev_fd, &fds_snd);
+				set_timeval(&tv_recv, 0, glb.hdlc_timeout);	
+				FD_ZERO(&fds_recv);
+				FD_SET(glb.dev_fd, &fds_recv);
+//			pthread_mutex_lock(&glb.hdlc_mutex);
+				ret = select(glb.dev_fd+1, NULL, &fds_snd, NULL, &tv_snd);
+				if (ret < 0)
 				{
 					pthread_mutex_unlock(&glb.hdlc_mutex);
+					printf("snd select err\n");
+					continue;
+				}
+
+				else if (ret == 0)
+				{
+					pthread_mutex_unlock(&glb.hdlc_mutex);
+			//		printf("snd select timeout\n");
+					printf("wait for HDLC send done timeout\n");
 					continue;
 				}
 				else 
 				{
-					if (FD_ISSET(glb.dev_fd, &fds))
+					if (FD_ISSET(glb.dev_fd, &fds_snd))
 					{
-						for (;;)
-						{
-							if (write(glb.dev_fd, hdlc_sbuf, hdlc_slen) == hdlc_slen)
+						//for (;;)
+						//{
+							if (write(glb.dev_fd, hdlc_sbuf, hdlc_slen) != hdlc_slen)
 							{
-								break;
+								continue;
 							}
-						}
+						//}
 					}
 				}		
-				memset(hdlc_rbuf, 0, sizeof(hdlc_rbuf));
-				set_timeval(&tv, 0, glb.hdlc_timeout);	
-				FD_ZERO(&fds);
-				FD_SET(glb.dev_fd, &fds);
-				if ((ret = select(glb.dev_fd+1, &fds, NULL, NULL, &tv)) < 0)
+//				memset(hdlc_rbuf, 0, sizeof(hdlc_rbuf));
+				if ((ret = select(glb.dev_fd+1, &fds_recv, NULL, NULL, &tv_recv)) < 0)
 				{
-					perror("Select for read HDLC receive buffer.\n");
+					printf("Select for read HDLC receive buffer.\n");
 					pthread_mutex_unlock(&glb.hdlc_mutex);
 					continue;
 				}
 				else if (ret == 0)
 				{
 					USER_DBG("Wait for IO module return HDLC data timeout.\n");
+				//	printf("Wait for IO module return HDLC data timeout.\n");
 					(module+num)->comm_stat.timeout_flag = true;	
 				}
 				else
 				{
-					for (;;)
+//20170704					for (;;)
+//20170704					{
+					if (FD_ISSET(glb.dev_fd, &fds_recv))
 					{
 						if ((hdlc_rlen = read(glb.dev_fd, hdlc_rbuf, sizeof(hdlc_rbuf))) != -1)
 						{
 							(module+num)->comm_stat.timeout_flag = false;	
-							break;
+//20170704							break;
 						}
 					}
+//20170704					}
 				}	
 				pthread_mutex_unlock(&glb.hdlc_mutex);
+				pthread_mutex_lock(&glb.hdlc_ch_change_mutex);
+				if (glb.hdlc_ch_change_flag == false)
+				{
+					fill_net_send_packet(module, num, hdlc_rbuf, hdlc_rlen, net_sbuf);		
+				}	
+				pthread_mutex_unlock(&glb.hdlc_ch_change_mutex);
 			}
-			pthread_mutex_lock(&glb.hdlc_ch_change_mutex);
-			if (glb.hdlc_ch_change_flag == false)
-			{
-				fill_net_send_packet(module, num, hdlc_rbuf, hdlc_rlen, net_sbuf);		
-			}	
-			pthread_mutex_unlock(&glb.hdlc_ch_change_mutex);
 			num++;
 			gettimeofday(&tv1, NULL);
 			tm = localtime(&tv1.tv_sec);
@@ -248,19 +277,23 @@ void *hdlc_comm_func(void *arg)
 				{
 					ch_num = 3;
 				}
-				if ((module+num)->comm_stat.timeout_flag == true)
+				if (glb.hdlc_ch_change_flag == false)
 				{
-					sprintf(log_buf, "addr(%d),channel(%d),comm_cnt(%d),timeout,%d%02d%02d-%02d:%02d:%02d:%ld", num, ch_num, (module+num)->comm_stat.comm_cnt, 1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tv1.tv_usec/1000) ; 
-					write(glb.log_fd, log_buf, strlen(log_buf));
-					write(glb.log_fd, "\n", 1);
-				}
-				if ((module+num)->comm_stat.err_flag == true)
-				{
-					sprintf(log_buf, "addr(%d),channel(%d),comm_cnt(%d),error,%d%02d%02d-%02d:%02d:%02d:%ld", num, ch_num, (module+num)->comm_stat.comm_cnt, 1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tv1.tv_usec/1000) ; 
-					write(glb.log_fd, log_buf, strlen(log_buf));
-					write(glb.log_fd, "\n", 1);
+					if ((module+num)->comm_stat.timeout_flag == true)
+					{
+						sprintf(log_buf, "addr(%d),channel(%d),comm_cnt(%d),timeout,%d%02d%02d-%02d:%02d:%02d:%ld", num, ch_num, (module+num)->comm_stat.comm_cnt, 1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tv1.tv_usec/1000) ; 
+						write(glb.log_fd, log_buf, strlen(log_buf));
+						write(glb.log_fd, "\n", 1);
+					}
+					if ((module+num)->comm_stat.err_flag == true)
+					{
+						sprintf(log_buf, "addr(%d),channel(%d),comm_cnt(%d),error,%d%02d%02d-%02d:%02d:%02d:%ld", num, ch_num, (module+num)->comm_stat.comm_cnt, 1900+tm->tm_year, 1+tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tv1.tv_usec/1000) ; 
+						write(glb.log_fd, log_buf, strlen(log_buf));
+						write(glb.log_fd, "\n", 1);
+					}
 				}
 			}
+			usleep(1500);
 		}
 		if (glb.get_data_flag == true)
 		{
@@ -272,7 +305,7 @@ void *hdlc_comm_func(void *arg)
 			{
 				if (FD_ISSET(glb.client_fd, &fds))
 				{
-					ret = send(glb.client_fd, net_sbuf, net_slen, 0);
+					ret = send(glb.client_fd, net_sbuf, net_slen, MSG_NOSIGNAL);  //Linux下当连接断开，还发数据的时候，不仅send()的返回值会有反映，而且还会向系统发送一个异常消息，如果不作处理，系统会出BrokePipe，程序会退出，这对于服务器提供稳定的服务将造成巨大的灾难。为此，send()函数的最后一个参数可以设MSG_NOSIGNAL，禁止send()函数向系统发送异常消息
 				}
 			}
 			pthread_mutex_lock(&glb.hdlc_mutex);

@@ -1,7 +1,7 @@
 OBJS = iobus_main.o iobus_common.o iobus_net.o iobus_hdlc.o iobus_crc.o
 CC = arm-none-linux-gnueabi-gcc
 
-CFLAGS = -pipe -O2 -Wall -W -D_REENTRANT 
+CFLAGS = -g -pipe -O2 -Wall -W -D_REENTRANT 
 final: $(OBJS)
 	$(CC) -o iobus_app $(OBJS) $(CFLAGS) -lpthread
 iobus_main.o: iobus_main.c
